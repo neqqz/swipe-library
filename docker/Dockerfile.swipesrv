@@ -1,0 +1,56 @@
+FROM debian:forky AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    git-lfs \
+    wget \
+    curl \
+    ca-certificates \
+    python3 \
+    python3-venv \
+    python3-dev \
+    libmicrohttpd-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git lfs install
+
+# Clone models
+FROM builder AS models
+
+WORKDIR /models
+RUN git clone https://huggingface.co/futo-org/futo-swipe /models
+RUN curl -o /models/en.combined https://dl.keyboard.futo.org/en_w2.combined
+
+# Build project
+FROM builder AS swipesrv-build
+
+COPY . /source
+WORKDIR /source
+RUN make host
+
+# Runtime
+FROM debian:forky AS runtime
+
+RUN apt-get update && apt-get install -y \
+    libstdc++6 \
+    libgcc-s1 \
+    ca-certificates \
+    libmicrohttpd12t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 user
+
+COPY --from=models /models /models
+COPY --from=swipesrv-build /source/build/swipesrv /usr/local/bin/swipesrv
+COPY --from=swipesrv-build /source/models/layouts /models/layouts
+RUN chmod +x /usr/local/bin/swipesrv && \
+    chown -R user:user /models
+
+USER user
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/swipesrv"]
+CMD [ "--encoder", "/models/honorable_sturgeon/model_fp32.pte", "--decoder", "/models/magic_macaw/model_fp32.pte", "--lm-model", "/models/hungry_jellyfish/context_lm.pte", "--lm-vocab", "/models/hungry_jellyfish/vocab.txt", "--layout", "/models/layouts/en_qwerty.json", "--dict", "/models/en.combined", "--port", "8080" ]

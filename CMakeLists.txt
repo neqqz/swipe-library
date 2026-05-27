@@ -98,6 +98,18 @@ if(HAVE_EXECUTORCH AND ETI_IS_TOP_LEVEL)
     target_link_libraries(eval_accuracy PRIVATE swipe_decoder)
     target_link_executorch(eval_accuracy)
 
+
+    find_library(MICROHTTPD_LIBRARY NAMES microhttpd)
+
+    if(MICROHTTPD_LIBRARY)
+        add_executable(swipesrv targets/swipesrv.cpp)
+        target_link_libraries(swipesrv PRIVATE swipe_decoder)
+        target_link_libraries(swipesrv PRIVATE ${MICROHTTPD_LIBRARY})
+        target_link_executorch(swipesrv)
+    else()
+        message(STATUS "microhttpd not found, skipping swipesrv target")
+    endif()
+
     add_executable(infer_jsonl targets/infer_jsonl.cpp)
     target_link_libraries(infer_jsonl PRIVATE swipe_decoder)
     target_link_executorch(infer_jsonl)

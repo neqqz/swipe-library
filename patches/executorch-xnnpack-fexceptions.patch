@@ -1,0 +1,17 @@
+diff --git a/backends/xnnpack/CMakeLists.txt b/backends/xnnpack/CMakeLists.txt
+index 625e3d2523..0d93258011 100644
+--- a/backends/xnnpack/CMakeLists.txt
++++ b/backends/xnnpack/CMakeLists.txt
+@@ -119,6 +119,12 @@ target_include_directories(
+   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third-party/cpuinfo/include
+ )
+ target_compile_options(xnnpack_backend PUBLIC ${_common_compile_options})
++# XNNPACK's aligned-allocator.h / buffer.h throw std::bad_alloc, so this
++# target needs exceptions even when EXECUTORCH_OPTIMIZE_SIZE strips them
++# globally. Upstream used the same escape hatch for the quantized kernel
++# generated libs in PR #14962; no equivalent fix has landed for xnnpack
++# as of v1.2.0.
++target_compile_options(xnnpack_backend PRIVATE -fexceptions)
+ executorch_target_link_options_shared_lib(xnnpack_backend)
+ 
+ executorch_move_interface_include_directories_to_build_time_only(XNNPACK)

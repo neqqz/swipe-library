@@ -1,0 +1,7 @@
+aten::clamp.out
+aten::embedding.out
+aten::lt.Scalar_out
+aten::native_layer_norm.out
+aten::sum.IntList_out
+aten::unsqueeze_copy.out
+aten::where.self_out

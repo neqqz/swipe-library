@@ -1,0 +1,16 @@
+aten::_log_softmax.out
+aten::arange.start_out
+aten::atan2.out
+aten::bitwise_not.out
+aten::cumsum.out
+aten::expand_copy.out
+aten::full_like.out
+aten::gt.Scalar_out
+aten::lt.Scalar_out
+aten::scalar_tensor.out
+aten::select_copy.int_out
+aten::split_with_sizes_copy.out
+aten::squeeze_copy.dims_out
+aten::unsqueeze_copy.out
+aten::where.self_out
+dim_order_ops::_to_dim_order_copy.out

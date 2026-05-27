@@ -1,0 +1,48 @@
+build/
+build-android-*/
+build-asan/
+*.json
+!models/*/ops.txt
+!models/layouts/*.json
+!models/scoring.json
+
+# Model binaries (tracked via LFS or external)
+*.pte
+
+# Android build artifacts
+android/.gradle/
+android/.cxx/
+android/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Benchmark results
+benchmark_results.json
+
+# Local-only directories
+tutorial/
+tools/
+
+# Local data/artifacts
+*.apk
+*.jsonl
+*.combined
+*.combined.gz
+eval/*.bin
+REVIEW_FINDINGS*.md
+.codex
+
+# Python venv (auto-created by Makefile for ET codegen)
+.venv/
+
+# ExecuTorch build artifacts (inside submodule)
+third_party/executorch/cmake-out-host/
+third_party/executorch/cmake-out-arm64-v8a/
+third_party/executorch/cmake-out-armeabi-v7a/
+third_party/executorch/cmake-out-x86_64/
+third_party/executorch/cmake-out-x86/
+

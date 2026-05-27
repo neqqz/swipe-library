@@ -1,0 +1,2 @@
+aten::_log_softmax.out
+aten::native_layer_norm.out

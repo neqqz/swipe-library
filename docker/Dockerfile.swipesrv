@@ -29,6 +29,7 @@ FROM builder AS swipesrv-build
 COPY . /source
 WORKDIR /source
 RUN make host
+RUN gcc docker/check-health.c -o build/check-health
 
 # Runtime
 FROM debian:forky AS runtime
@@ -45,7 +46,9 @@ RUN useradd -m -u 1000 user
 COPY --from=models /models /models
 COPY --from=swipesrv-build /source/build/swipesrv /usr/local/bin/swipesrv
 COPY --from=swipesrv-build /source/models/layouts /models/layouts
+COPY --from=swipesrv-build /source/build/check-health /usr/local/bin/check-health
 RUN chmod +x /usr/local/bin/swipesrv && \
+    chmod +x /usr/local/bin/check-health && \
     chown -R user:user /models
 
 USER user

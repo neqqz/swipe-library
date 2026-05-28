@@ -143,6 +143,21 @@ static MHD_Result send_error(MHD_Connection* conn, unsigned int status, const ch
 
 static MHD_Result answer(void* cls, MHD_Connection* conn, const char* url, const char* method,
                   const char* version, const char* upload_data, size_t* upload_data_size, void** con_cls) {
+    if (strcmp(method, "GET") == 0 && strcmp(url, "/health") == 0) {
+        const char *healthy_response = "meow";
+
+        // make sure engine can actually run before giving healthy response
+        auto lock = [&]() {
+            std::lock_guard<std::mutex> lock(engine_mutex);
+            return true;
+        }();
+
+        struct MHD_Response *response = MHD_create_response_from_buffer(std::strlen(healthy_response), (void*)healthy_response, MHD_RESPMEM_PERSISTENT);
+        MHD_Result ret = MHD_queue_response(conn, 200, response);
+        MHD_destroy_response(response);
+        return ret;
+    }
+
     if (strcmp(method, "OPTIONS") == 0 && strcmp(url, "/recognize") == 0) {
         struct MHD_Response *response = MHD_create_response_from_buffer(0, nullptr, MHD_RESPMEM_PERSISTENT);
         MHD_add_response_header(response, "Access-Control-Allow-Origin", "*");

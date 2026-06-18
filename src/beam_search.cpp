@@ -449,6 +449,8 @@ void TrieBeamSearch::decode_with_scores_multi(
 
         words_out.emplace_back(dw);
     }
+
+    itrie->end_search();
 }
 
 void TrieBeamSearch::finish_decode(

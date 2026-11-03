@@ -38,25 +38,162 @@ static std::string jstr_or_empty(JNIEnv* env, jstring s) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// CPU affinity helpers
+//
+// Goals:
+//  1. Prefer big (or little) cores when the cgroup allows them.
+//  2. Never fight the cgroup: always intersect with the currently allowed mask.
+//  3. Cache topology so we don't re-read /sys on every call (that was slow
+//     enough to contribute to frame drops on input-start).
+//  4. If no preferred cores are available right now, leave affinity alone
+//     instead of forcing a useless / contested pin.
+// ---------------------------------------------------------------------------
+
+struct CoreInfo {
+    int id;
+    long max_freq;
+};
+
+struct Topology {
+    std::vector<CoreInfo> cores;
+    long min_freq = 0;
+    long max_freq = 0;
+    bool ready = false;
+};
+
+static Topology& topology() {
+    static Topology t;
+    if (t.ready) return t;
+
+    for (int i = 0; i < CPU_SETSIZE && i < 64; ++i) {
+        char path[128];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        FILE* f = fopen(path, "r");
+        if (!f) {
+            if (i < 16) continue;  // sparse online mask early on
+            break;
+        }
+        long freq = 0;
+        if (fscanf(f, "%ld", &freq) == 1 && freq > 0) {
+            t.cores.push_back({i, freq});
+        }
+        fclose(f);
+    }
+
+    if (!t.cores.empty()) {
+        t.min_freq = t.cores[0].max_freq;
+        t.max_freq = t.cores[0].max_freq;
+        for (auto& c : t.cores) {
+            t.min_freq = std::min(t.min_freq, c.max_freq);
+            t.max_freq = std::max(t.max_freq, c.max_freq);
+        }
+    }
+    t.ready = true;
+    return t;
+}
+
+static int cpu_count(const cpu_set_t& set, const std::vector<CoreInfo>& cores) {
+    int n = 0;
+    for (auto& c : cores) {
+        if (CPU_ISSET(c.id, &set)) ++n;
+    }
+    return n;
+}
+
+// Preferred cores ∩ currently allowed (cgroup). Returns selected count.
+static int build_preferred_mask(const char* affinity, cpu_set_t* out) {
+    const Topology& topo = topology();
+    if (topo.cores.empty()) return 0;
+
+    const bool want_big = (std::string(affinity) == "big");
+    const bool want_little = (std::string(affinity) == "little");
+    if (!want_big && !want_little) return 0;
+
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+        return 0;
+    }
+
+    CPU_ZERO(out);
+    int count = 0;
+    const bool homogeneous = (topo.min_freq == topo.max_freq);
+
+    for (auto& c : topo.cores) {
+        if (!CPU_ISSET(c.id, &allowed)) continue;
+
+        const bool is_little = (c.max_freq == topo.min_freq);
+        const bool select = homogeneous
+            || (want_big && !is_little)
+            || (want_little && is_little);
+
+        if (select) {
+            CPU_SET(c.id, out);
+            ++count;
+        }
+    }
+
+    // Preferred cluster fully outside cgroup → use fastest allowed cores.
+    if (count == 0 && want_big) {
+        long best = -1;
+        for (auto& c : topo.cores) {
+            if (CPU_ISSET(c.id, &allowed) && c.max_freq > best) {
+                best = c.max_freq;
+            }
+        }
+        if (best > 0) {
+            for (auto& c : topo.cores) {
+                if (CPU_ISSET(c.id, &allowed) && c.max_freq == best) {
+                    CPU_SET(c.id, out);
+                    ++count;
+                }
+            }
+        }
+    }
+
+    return count;
+}
+
 static int pin_to_cores(const char* affinity);
 
 // Save the calling thread's CPU affinity on construction, pin to big cores for
 // the lifetime of the scope, then restore the saved mask.
+// If big cores are not currently allowed by the cgroup, leave affinity alone
+// so we don't create unnecessary contention on a tiny allowed set.
 class LoadOnBigCores {
   cpu_set_t saved_{};
   bool has_saved_ = false;
+  bool did_pin_ = false;
 public:
     LoadOnBigCores() {
         if (sched_getaffinity(0, sizeof(saved_), &saved_) == 0) {
             has_saved_ = true;
         }
-        pin_to_cores("big");
+
+        cpu_set_t preferred;
+        const int n = build_preferred_mask("big", &preferred);
+        if (n <= 0) return;
+
+        const int current = has_saved_
+            ? cpu_count(saved_, topology().cores)
+            : 0;
+
+        // Only call setaffinity when it actually restricts/improves the mask.
+        if (!has_saved_ || n < current) {
+            if (sched_setaffinity(0, sizeof(preferred), &preferred) == 0) {
+                did_pin_ = true;
+            }
+        }
     }
+
     ~LoadOnBigCores() {
-        if (has_saved_) {
+        if (has_saved_ && did_pin_) {
             sched_setaffinity(0, sizeof(saved_), &saved_);
         }
     }
+
     LoadOnBigCores(const LoadOnBigCores&) = delete;
     LoadOnBigCores& operator=(const LoadOnBigCores&) = delete;
 };
@@ -400,67 +537,33 @@ Java_org_futo_ml_inference_SwipeDecoder_nativeDestroy(
 }
 
 // Pin the calling thread to big or little cores.
-// Returns the number of cores pinned, or 0 on failure.
+// Returns the number of cores in the resulting mask, or 0 on failure / no-op.
 static int pin_to_cores(const char* affinity) {
-    std::string aff(affinity);
-    if (aff != "big" && aff != "little") return 0;
-
-    struct CoreInfo { int id; long max_freq; };
-    std::vector<CoreInfo> cores;
-    for (int i = 0; i < CPU_SETSIZE && i < 64; ++i) {
-        char path[128];
-        snprintf(path, sizeof(path),
-                 "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
-        FILE* f = fopen(path, "r");
-        if (!f) {
-            if (i < 16) continue;
-            break;
-        }
-        long freq = 0;
-        if (fscanf(f, "%ld", &freq) == 1 && freq > 0) {
-            cores.push_back({i, freq});
-        }
-        fclose(f);
-    }
-    if (cores.empty()) return 0;
-
-    long min_freq = cores[0].max_freq;
-    long max_freq = cores[0].max_freq;
-    for (auto& c : cores) {
-        min_freq = std::min(min_freq, c.max_freq);
-        max_freq = std::max(max_freq, c.max_freq);
-    }
-
     cpu_set_t mask;
-    CPU_ZERO(&mask);
-    int count = 0;
-    for (auto& c : cores) {
-        bool is_little = (c.max_freq == min_freq);
-        bool select = (min_freq == max_freq)
-            || (aff == "big" && !is_little)
-            || (aff == "little" && is_little);
-        if (select) {
-            CPU_SET(c.id, &mask);
-            ++count;
-        }
+    const int count = build_preferred_mask(affinity, &mask);
+    if (count == 0) {
+        // Nothing usable under current cgroup — leave affinity alone.
+        return 0;
     }
-    if (count == 0) return 0;
 
     if (sched_setaffinity(0, sizeof(mask), &mask) != 0) return 0;
 
     cpu_set_t actual;
     CPU_ZERO(&actual);
-    sched_getaffinity(0, sizeof(actual), &actual);
-    int actual_count = 0;
-    for (auto& c : cores) {
-        if (CPU_ISSET(c.id, &actual)) ++actual_count;
+    if (sched_getaffinity(0, sizeof(actual), &actual) != 0) {
+        return count;
     }
-    if (actual_count != count) {
-        LOGI("pinCores: requested %d cores but got %d (cgroup restriction)", count, actual_count);
+    const int actual_count = cpu_count(actual, topology().cores);
+
+    // Log only once per process to avoid spam / extra cost on hot path.
+    static bool logged_restriction = false;
+    if (!logged_restriction && actual_count > 0 && actual_count < count) {
+        LOGI("pinCores: preferred %d cores, cgroup allowed %d", count, actual_count);
+        logged_restriction = true;
     }
 
 #ifdef __aarch64__
-    if (aff == "little") {
+    if (affinity && std::string(affinity) == "little") {
         unsigned long hwcap = getauxval(AT_HWCAP);
         if (hwcap & (1UL << 22)) {
             LOGE("pinCores: HWCAP reports SVE but pinned to little cores - ISA mismatch risk");
@@ -478,7 +581,9 @@ Java_org_futo_ml_inference_SwipeDecoder_nativePinCores(
     const char* aff_cstr = env->GetStringUTFChars(affinityStr, nullptr);
     if (!aff_cstr) return 0;
     int result = pin_to_cores(aff_cstr);
-    LOGI("pinCores(%s): pinned to %d cores", aff_cstr, result);
+    if (result > 0) {
+        LOGI("pinCores(%s): pinned to %d cores", aff_cstr, result);
+    }
     env->ReleaseStringUTFChars(affinityStr, aff_cstr);
     return result;
 }
